@@ -38,3 +38,6 @@ KDUMP_IMG="vmlinuz"
 
 #What is the images extension.  Relocatable kernels don't have one
 KDUMP_IMG_EXT=""
+
+#early kdump support
+EARLY_KDUMP_SUPPORT=""

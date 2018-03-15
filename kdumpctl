@@ -10,6 +10,7 @@ DRACUT_MODULES_FILE="/usr/lib/dracut/modules.txt"
 SAVE_PATH=/var/crash
 SSH_KEY_LOCATION="/root/.ssh/kdump_id_rsa"
 INITRD_CHECKSUM_LOCATION="/boot/.fadump_initrd_checksum"
+INITRD_CHECKSUM_EARLYKDUMP="/boot/.earlykdump_initrd_checksum"
 DUMP_TARGET=""
 DEFAULT_INITRD=""
 DEFAULT_INITRD_BAK=""
@@ -60,54 +61,6 @@ determine_dump_mode()
 		echo "Dump mode is fadump"
 		DEFAULT_DUMP_MODE="fadump"
 	fi
-}
-
-# remove_cmdline_param <kernel cmdline> <param1> [<param2>] ... [<paramN>]
-# Remove a list of kernel parameters from a given kernel cmdline and print the result.
-# For each "arg" in the removing params list, "arg" and "arg=xxx" will be removed if exists.
-remove_cmdline_param()
-{
-	local cmdline=$1
-	shift
-
-	for arg in $@; do
-		cmdline=`echo $cmdline | \
-			 sed -e "s/\b$arg=[^ ]*//g" \
-			     -e "s/^$arg\b//g" \
-			     -e "s/[[:space:]]$arg\b//g" \
-			     -e "s/\s\+/ /g"`
-	done
-	echo $cmdline
-}
-
-#
-# This function returns the "apicid" of the boot
-# cpu (cpu 0) if present.
-#
-get_bootcpu_apicid()
-{
-    awk '							\
-	BEGIN { CPU = "-1"; }					\
-	$1=="processor" && $2==":"	{ CPU = $NF; }		\
-	CPU=="0" && /^apicid/		{ print $NF; }		\
-	'							\
-	/proc/cpuinfo
-}
-
-#
-# This function appends argument "$2=$3" to string ($1) if not already present.
-#
-append_cmdline()
-{
-	local cmdline=$1
-	local newstr=${cmdline/$2/""}
-
-	# unchanged str implies argument wasn't there
-	if [ "$cmdline" == "$newstr" ]; then
-		cmdline="${cmdline} ${2}=${3}"
-	fi
-
-	echo $cmdline
 }
 
 # This function performs a series of edits on the command line.
@@ -206,6 +159,53 @@ rebuild_kdump_initrd()
 	fi
 
 	return 0
+}
+
+restore_default_initramfs()
+{
+    if [ -f ${DEFAULT_INITRD_BAK} ] && [ -f ${INITRD_CHECKSUM_EARLYKDUMP} ]; then
+        # verify checksum before restoring
+        backup_checksum=`sha1sum ${DEFAULT_INITRD_BAK} | awk '{ print $1 }'`
+        default_checksum=`cat ${INITRD_CHECKSUM_EARLYKDUMP} | awk '{ print $1 }'`
+        if [ "${default_checksum}" != "${backup_checksum}" ]; then
+            echo "WARNING: checksum mismatch! Can't restore original initrd..."
+        else
+            rm -f ${INITRD_CHECKSUM_EARLYKDUMP}
+            mv ${DEFAULT_INITRD_BAK} ${DEFAULT_INITRD}
+            if [[ $? -eq 0 ]]; then
+                echo "Restored original initrd."
+                sync
+            fi
+        fi
+    fi
+}
+
+rebuild_early_kdump_initrd()
+{
+    if [ ! -f "${DEFAULT_INITRD_BAK}" ]; then
+        if [ ! -f "${DEFAULT_INITRD}" ]; then
+            echo "${DEFAULT_INITRD} is not exist."
+            return 1
+        fi
+        echo "early kdump is backing up ${DEFAULT_INITRD} ..."
+        sha1sum ${DEFAULT_INITRD} > ${INITRD_CHECKSUM_EARLYKDUMP}
+        cp ${DEFAULT_INITRD} ${DEFAULT_INITRD_BAK}
+        if [ $? -ne 0 ]; then
+            echo "WARNING: failed to backup ${DEFAULT_INITRD} in early kdump."
+            rm -f ${DEFAULT_INITRD_BAK}
+            return 1
+        fi
+        sync
+    fi
+
+    dracut -I ${kdump_kernel} -I ${TARGET_INITRD} -v ${DEFAULT_INITRD} --force
+    if [ $? != 0 ]; then
+        echo "dracut: failed to make early kdump initrd" >&2
+        restore_default_initramfs
+        return 1
+    fi
+
+    return 0
 }
 
 rebuild_initrd()
@@ -610,6 +610,12 @@ check_rebuild()
 		return 1
 	fi
 
+	if [[ $EARLY_KDUMP_SUPPORT = "yes" ]]; then
+		rebuild_early_kdump_initrd
+	elif [[ $EARLY_KDUMP_SUPPORT = "no" ]]; then
+		restore_default_initramfs
+	fi
+
 	_force_no_rebuild=`grep ^force_no_rebuild $KDUMP_CONFIG_FILE 2>/dev/null`
 	if [ $? -eq 0 ]; then
 		force_no_rebuild=`echo $_force_no_rebuild | cut -d' '  -f2`
@@ -684,14 +690,6 @@ check_rebuild()
 	echo "Rebuilding $TARGET_INITRD"
 	rebuild_initrd
 	return $?
-}
-
-# This function check iomem and determines if we have more than
-# 4GB of ram available. Returns 1 if we do, 0 if we dont
-need_64bit_headers()
-{
-	return `tail -n 1 /proc/iomem | awk '{ split ($1, r, "-"); \
-	print (strtonum("0x" r[2]) > strtonum("0xffffffff")); }'`
 }
 
 # Load the kdump kernel specified in /etc/sysconfig/kdump
@@ -850,21 +848,6 @@ check_current_fadump_status()
 	return 1
 }
 
-check_current_kdump_status()
-{
-	if [ ! -f /sys/kernel/kexec_crash_loaded ];then
-		echo "Perhaps CONFIG_CRASH_DUMP is not enabled in kernel"
-		return 1
-	fi
-
-	rc=`cat /sys/kernel/kexec_crash_loaded`
-	if [ $rc == 1 ]; then
-		return 0
-	else
-		return 1
-	fi
-}
-
 check_current_status()
 {
 	if [ $DEFAULT_DUMP_MODE == "fadump" ]; then
@@ -972,58 +955,6 @@ selinux_relabel()
 			restorecon $_i;
 		fi
 	done
-}
-
-# Check if secure boot is being enforced.
-#
-# Per Peter Jones, we need check efivar SecureBoot-$(the UUID) and
-# SetupMode-$(the UUID), they are both 5 bytes binary data. The first four
-# bytes are the attributes associated with the variable and can safely be
-# ignored, the last bytes are one-byte true-or-false variables. If SecureBoot
-# is 1 and SetupMode is 0, then secure boot is being enforced.
-#
-# Assume efivars is mounted at /sys/firmware/efi/efivars.
-is_secure_boot_enforced()
-{
-	local secure_boot_file setup_mode_file
-	local secure_boot_byte setup_mode_byte
-
-	secure_boot_file=$(find /sys/firmware/efi/efivars -name SecureBoot-* 2>/dev/null)
-	setup_mode_file=$(find /sys/firmware/efi/efivars -name SetupMode-* 2>/dev/null)
-
-	if [ -f "$secure_boot_file" ] && [ -f "$setup_mode_file" ]; then
-		secure_boot_byte=$(hexdump -v -e '/1 "%d\ "' $secure_boot_file|cut -d' ' -f 5)
-		setup_mode_byte=$(hexdump -v -e '/1 "%d\ "' $setup_mode_file|cut -d' ' -f 5)
-
-		if [ "$secure_boot_byte" = "1" ] && [ "$setup_mode_byte" = "0" ]; then
-			return 0
-		fi
-	fi
-
-	return 1
-}
-
-check_crash_mem_reserved()
-{
-	local mem_reserved
-
-	mem_reserved=$(cat /sys/kernel/kexec_crash_size)
-	if [ $mem_reserved -eq 0 ]; then
-		echo "No memory reserved for crash kernel"
-		return 1
-	fi
-
-	return 0
-}
-
-check_kdump_feasibility()
-{
-	if [ ! -e /sys/kernel/kexec_crash_loaded ]; then
-		echo "Kdump is not supported on this kernel"
-		return 1
-	fi
-	check_crash_mem_reserved
-	return $?
 }
 
 check_fence_kdump_config()

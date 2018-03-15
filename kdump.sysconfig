@@ -35,3 +35,6 @@ KEXEC_ARGS=""
 
 #What is the image type used for kdump
 KDUMP_IMG="vmlinuz"
+
+#early kdump support
+EARLY_KDUMP_SUPPORT=""

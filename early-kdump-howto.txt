@@ -1,0 +1,58 @@
+Early Kdump HOWTO
+
+Introduction
+
+Kdump service runs too late, so early crashes will have no chance to get kdump
+kernel booting. A proposal is add a dracut module to load pre-built kernel and
+initramfs for early kdump, one can provide "rd.early-kdump" in grub commandline
+to enable, then the service can load those files like original kdump, which is
+disabled by default.
+
+For the normal kdump service in real root init path, it can check whether the
+prebuilt kernel and initramfs have been loaded. It has no conflict with the early
+kdump.
+
+How to configure early kdump:
+
+We assume if you're reading this document, you should already have kexec-tools
+installed. If not, you install it via the following command:
+
+    # yum install kexec-tools
+
+For early kdump, you can set "EARLY_KDUMP_SUPPORT=yes" in /etc/sysconfig/kdump
+if you want to rebuild the initramfs for early kdump, and then:
+    # kdumpctl restart
+
+By the way, the initramfs will become large, early kdump put the kernel and
+initramfs for kdump into the initramfs for boot. If you set "EARLY_KDUMP_SUPPORT
+=no" in /etc/sysconfig/kdump, which will restore previous initramfs, that is to
+say, it doesn't have early kdump.
+
+
+Next up, we need to modify some boot parameters to enable early kdump, it's
+very easy to append "rd.early-kdump" to your kernel boot parameters in grub.
+After making said changes, reboot your system to take effect. Of course, if
+you want to disable early kdump, you can simply remove "rd.early-kdump" from
+kernel boot parameters in grub, and reboot system like above.
+
+Now that you've got some messages about early kdump, you can check whether early
+kdump is successful like this:
+
+    # journalctl -x|grep early-kdump
+
+Then, you will see some useful logs, for exapmles:
+
+1. if early kdump is successful.
+Mar 09 09:57:56 localhost.localdomain early-kdump[477]: early-kdump is enabled.
+Mar 09 09:57:56 localhost.localdomain early-kdump[477]: kexec: loaded early-
+kdump kernel
+
+2. if early kdump is disabled.
+Mar 09 10:02:47 localhost.localdomain early-kdump[474]: early-kdump is not en-
+abled by default.
+
+Notes:
+You will need to make sure that appropriate initramfs and vmlinuz, if early kdump
+doesn't find them it will refuse to go on.
+
+In addition, early kdump doesn't support fadump, maybe it will have this in future.
