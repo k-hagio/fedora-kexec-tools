@@ -9,8 +9,7 @@
 
 [Unit]
 Description=early kdump
-DefaultDependencies=yes
-After=local-fs.target
+DefaultDependencies=no
 Before=initrd-fs.target
 
 [Service]

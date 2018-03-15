@@ -1,6 +1,6 @@
 Name: kexec-tools
 Version: 2.0.16
-Release: 5%{?dist}
+Release: 5%{?dist}.lianbo1.5
 License: GPLv2
 Group: Applications/System
 Summary: The kexec/kdump userspace component
