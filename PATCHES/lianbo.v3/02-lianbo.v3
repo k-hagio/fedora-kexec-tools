@@ -1,0 +1,276 @@
+
+
+Kdump service starts too late, so early crashes will have no chance
+to get kdump kernel booting, this will cause crash information to be
+lost. It is necessary to add a dracut module in order to load crash
+kernel and initramfs as early as possible. You can provide "rd.early
+kdump" in grub commandline to enable, then the early kdump will load
+those files like the normal kdump, which is disabled by default.
+
+For the normal kdump service, it can check whether the early kdump
+has loaded the crash kernel and initramfs. It has no conflict with
+the early kdump.
+
+If you rebuild the new initramfs for early kdump, the new initramfs
+size will become large, because it will put the vmlinuz and kdump
+initramfs into the new initramfs.
+
+In addition, early kdump doesn't support fadump.
+
+Signed-off-by: Lianbo Jiang <lijiang@redhat.com>
+---
+ dracut-early-kdump-module-setup.sh | 22 +++++++++++
+ dracut-early-kdump.sh              | 81 ++++++++++++++++++++++++++++++++++++++
+ early-kdump-howto.txt              | 62 +++++++++++++++++++++++++++++
+ kexec-tools.spec                   | 11 ++++++
+ 4 files changed, 176 insertions(+)
+ create mode 100755 dracut-early-kdump-module-setup.sh
+ create mode 100755 dracut-early-kdump.sh
+ create mode 100644 early-kdump-howto.txt
+
+diff --git a/dracut-early-kdump-module-setup.sh b/dracut-early-kdump-module-setup.sh
+new file mode 100755
+index 0000000..d47e81a
+--- /dev/null
++++ b/dracut-early-kdump-module-setup.sh
+@@ -0,0 +1,22 @@
++#!/bin/bash
++
++check() {
++    if [ ! -f /etc/sysconfig/kdump ] || [ ! -f /lib/kdump/kdump-lib.sh ]\
++        || [ -n "${IN_KDUMP}" ]
++    then
++        return 1
++    fi
++    return 0
++}
++
++depends() {
++    echo "base shutdown"
++    return 0
++}
++
++install() {
++    inst_simple "/etc/sysconfig/kdump" "/etc/sysconfig/kdump"
++    inst_simple "/usr/sbin/kexec" "/usr/sbin/kexec"
++    inst_script "/lib/kdump/kdump-lib.sh" "/lib/kdump-lib.sh"
++    inst_hook cmdline 00 "$moddir/early-kdump.sh"
++}
+diff --git a/dracut-early-kdump.sh b/dracut-early-kdump.sh
+new file mode 100755
+index 0000000..2a746b4
+--- /dev/null
++++ b/dracut-early-kdump.sh
+@@ -0,0 +1,81 @@
++#! /bin/sh
++
++KEXEC=/sbin/kexec
++standard_kexec_args="-p"
++
++EARLY_KDUMP_INITRD=""
++EARLY_KDUMP_KERNEL=""
++EARLY_KDUMP_CMDLINE=""
++EARLY_KDUMP_KERNELVER=""
++EARLY_KEXEC_ARGS=""
++
++. /etc/sysconfig/kdump
++. /lib/dracut-lib.sh
++. /lib/kdump-lib.sh
++
++prepare_parameters()
++{
++    EARLY_KDUMP_CMDLINE=$(prepare_cmdline "${KDUMP_COMMANDLINE}" "${KDUMP_COMMANDLINE_REMOVE}" "${KDUMP_COMMANDLINE_APPEND}")
++    KDUMP_BOOTDIR=$(check_boot_dir "${KDUMP_BOOTDIR}")
++
++    #make early-kdump kernel string
++    if [ -z "$EARLY_KDUMP_KERNELVER" ]; then
++        EARLY_KDUMP_KERNELVER=`uname -r`
++    fi
++    EARLY_KDUMP_KERNEL="${KDUMP_BOOTDIR}/${KDUMP_IMG}-${EARLY_KDUMP_KERNELVER}${KDUMP_IMG_EXT}"
++
++    #make early-kdump initrd string
++    EARLY_KDUMP_INITRD="${KDUMP_BOOTDIR}/initramfs-${EARLY_KDUMP_KERNELVER}kdump.img"
++}
++
++early_kdump_load()
++{
++    check_kdump_feasibility
++    if [ $? -ne 0 ]; then
++        return 1
++    fi
++
++    if is_fadump_capable; then
++        echo "WARNING: early kdump doesn't support fadump."
++        return 1
++    fi
++
++    check_current_kdump_status
++    if [ $? == 0 ]; then
++        return 1
++    fi
++
++    prepare_parameters
++
++    EARLY_KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
++
++    if is_secure_boot_enforced; then
++        echo "Secure Boot is enabled. Using kexec file based syscall."
++        EARLY_KEXEC_ARGS="$EARLY_KEXEC_ARGS -s"
++    fi
++
++    $KEXEC ${EARLY_KEXEC_ARGS} $standard_kexec_args \
++        --command-line="$EARLY_KDUMP_CMDLINE" \
++        --initrd=$EARLY_KDUMP_INITRD $EARLY_KDUMP_KERNEL
++    if [ $? == 0 ]; then
++        echo "kexec: loaded early-kdump kernel"
++        return 0
++    else
++        echo "kexec: failed to load early-kdump kernel"
++        return 1
++    fi
++}
++
++set_early_kdump()
++{
++    if getargbool 0 rd.earlykdump; then
++        echo "early-kdump is enabled."
++        early_kdump_load
++    else
++        echo "early-kdump is disabled."
++    fi
++
++    return 0
++}
++
++set_early_kdump
+diff --git a/early-kdump-howto.txt b/early-kdump-howto.txt
+new file mode 100644
+index 0000000..c8264d8
+--- /dev/null
++++ b/early-kdump-howto.txt
+@@ -0,0 +1,62 @@
++Early Kdump HOWTO
++
++Introduction
++
++Kdump service starts too late, so early crashes will have no chance to get
++kdump kernel booting, this will cause crash information to be lost. It is
++necessary to add a dracut module in order to load crash kernel and initramfs
++as early as possible. You can provide "rd.earlykdump" in grub commandline
++to enable, then the early kdump will load those files like the normal kdump,
++which is disabled by default.
++
++For the normal kdump service, it can check whether the early kdump has loaded
++the crash kernel and initramfs. It has no conflict with the early kdump.
++
++How to configure early kdump:
++
++We assume if you're reading this document, you should already have kexec-tools
++installed.
++
++For early kdump, if you need to rebuild the initramfs, please manually execute
++dracut command:
++    # dracut -I ${kdump_kernel} -I ${kdump_initrd} -v ${new_initramfs} --force
++
++Parameters:
++"${kdump_kernel}"
++-It represents kernel image what you put it into the new initramfs.
++"${kdump_initrd}"
++-It represents kdump initramfs what you put it into the new initramfs.
++"${new_initramfs}"
++-It is a new initramfs for early kdump.
++
++For example:
++# dracut -I /boot/vmlinuz-`uname -r` -I /boot/initramfs-`uname -r`kdump.img \
++-v /boot/initramfs-`uname -r`.img --force
++
++By the way, if you rebuild the new initramfs for early kdump, the new initramfs
++size will become large, because it will put the vmlinuz and kdump initramfs into
++the new initramfs.
++
++Next up, we need to add "rd.earlykdump" to enable early kdump in grub. After
++making said changes, reboot your system to take effect. Of course, if you want
++to disable early kdump, you can simply remove "rd.earlykdump" from kernel boot
++parameters in grub, and reboot system like above.
++
++Once the boot is completed, you can check the status of the early kdump support
++on the command prompt:
++
++    # journalctl -x|grep early-kdump
++
++Then, you will see some useful logs, for exapmle:
++
++1. if early kdump is successful.
++Mar 09 09:57:56 localhost.localdomain dracut-cmdline[190]: early-kdump is enabled.
++Mar 09 09:57:56 localhost.localdomain dracut-cmdline[190]: kexec: loaded early-
++kdump kernel
++
++2. if early kdump is disabled.
++Mar 09 10:02:47 localhost.localdomain dracut-cmdline[189]: early-kdump is disabled.
++
++Limitation
++
++At present, early kdump doesn't support fadump.
+diff --git a/kexec-tools.spec b/kexec-tools.spec
+index f04527c..303b971 100644
+--- a/kexec-tools.spec
++++ b/kexec-tools.spec
+@@ -29,6 +29,7 @@ Source24: kdump-lib-initramfs.sh
+ Source25: kdump.sysconfig.ppc64le
+ Source26: kdumpctl.8
+ Source27: live-image-kdump-howto.txt
++Source28: early-kdump-howto.txt
+ 
+ #######################################
+ # These are sources for mkdumpramfs
+@@ -42,6 +43,8 @@ Source104: dracut-kdump-emergency.service
+ Source105: dracut-kdump-error-handler.service
+ Source106: dracut-kdump-capture.service
+ Source107: dracut-kdump-emergency.target
++Source108: dracut-early-kdump.sh
++Source109: dracut-early-kdump-module-setup.sh
+ 
+ Requires(post): systemd-units
+ Requires(preun): systemd-units
+@@ -136,6 +139,7 @@ rm -f kexec-tools.spec.in
+ cp %{SOURCE10} .
+ cp %{SOURCE21} .
+ cp %{SOURCE27} .
++cp %{SOURCE28} .
+ 
+ make
+ %ifarch %{ix86} x86_64 ppc64 s390x ppc64le aarch64
+@@ -194,6 +198,7 @@ make -C kdump-anaconda-addon install DESTDIR=$RPM_BUILD_ROOT
+ %find_lang kdump-anaconda-addon
+ 
+ %define remove_dracut_prefix() %(echo -n %1|sed 's/.*dracut-//g')
++%define remove_dracut_early_kdump_prefix() %(echo -n %1|sed 's/.*dracut-early-kdump-//g')
+ 
+ # deal with dracut modules
+ mkdir -p -m755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99kdumpbase
+@@ -207,6 +212,11 @@ cp %{SOURCE106} $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99kdumpb
+ cp %{SOURCE107} $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99kdumpbase/%{remove_dracut_prefix %{SOURCE107}}
+ chmod 755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99kdumpbase/%{remove_dracut_prefix %{SOURCE100}}
+ chmod 755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99kdumpbase/%{remove_dracut_prefix %{SOURCE101}}
++mkdir -p -m755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99earlykdump
++cp %{SOURCE108} $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99earlykdump/%{remove_dracut_prefix %{SOURCE108}}
++cp %{SOURCE109} $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99earlykdump/%{remove_dracut_early_kdump_prefix %{SOURCE109}}
++chmod 755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99earlykdump/%{remove_dracut_prefix %{SOURCE108}}
++chmod 755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99earlykdump/%{remove_dracut_early_kdump_prefix %{SOURCE109}}
+ 
+ 
+ %define dracutlibdir %{_prefix}/lib/dracut
+@@ -305,6 +315,7 @@ done
+ %license COPYING
+ %doc TODO
+ %doc kexec-kdump-howto.txt
++%doc early-kdump-howto.txt
+ %doc kdump-in-cluster-environment.txt
+ %doc live-image-kdump-howto.txt
+ %ifarch %{ix86} x86_64 ppc64 s390x ppc64le aarch64
+-- 
+2.9.5
+_______________________________________________
+kexec mailing list -- kexec@lists.fedoraproject.org
+To unsubscribe send an email to kexec-leave@lists.fedoraproject.org
+
