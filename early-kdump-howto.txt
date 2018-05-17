@@ -1,0 +1,50 @@
+Early Kdump HOWTO
+
+Introduction
+
+Kdump service starts too late, so early crashes will have no chance to get
+kdump kernel booting, this will cause crash information to be lost. It is
+necessary to add a dracut module in order to load crash kernel and initramfs
+as early as possible. You can provide "rd.earlykdump" in grub commandline
+to enable, then the early kdump will load those files like the normal kdump,
+which is disabled by default.
+
+For the normal kdump service, it can check whether the early kdump has loaded
+the crash kernel and initramfs. It has no conflict with the early kdump.
+
+How to configure early kdump:
+
+We assume if you're reading this document, you should already have kexec-tools
+installed.
+
+For early kdump, if you need to rebuild the initramfs, please manually execute
+dracut command:
+    # dracut --add earlykdump --force
+
+By the way, if you rebuild the new initramfs for early kdump, the new initramfs
+size will become large, because it will put the vmlinuz and kdump initramfs into
+the new initramfs.
+
+Next up, we need to add "rd.earlykdump" to enable early kdump in grub. After
+making said changes, reboot your system to take effect. Of course, if you want
+to disable early kdump, you can simply remove "rd.earlykdump" from kernel boot
+parameters in grub, and reboot system like above.
+
+Once the boot is completed, you can check the status of the early kdump support
+on the command prompt:
+
+    # journalctl -x|grep early-kdump
+
+Then, you will see some useful logs, for exapmle:
+
+1. if early kdump is successful.
+Mar 09 09:57:56 localhost.localdomain dracut-cmdline[190]: early-kdump is enabled.
+Mar 09 09:57:56 localhost.localdomain dracut-cmdline[190]: kexec: loaded early-
+kdump kernel
+
+2. if early kdump is disabled.
+Mar 09 10:02:47 localhost.localdomain dracut-cmdline[189]: early-kdump is disabled.
+
+Limitation
+
+At present, early kdump doesn't support fadump.
