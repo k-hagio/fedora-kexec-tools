@@ -160,6 +160,12 @@ target is specified, the default action can be set as dump_to_rootfs.  That mean
 dumping to target fails, dump vmcore to rootfs from initramfs context and reboot.
 .RE
 
+.B final_action <reboot | halt | poweroff>
+.RS
+Action to perform in case dumping to the intended target succeeds. The default is
+"reboot". Each action is same as the "default" directive above.
+.RE
+
 .B force_rebuild <0 | 1>
 .RS
 By default, kdump initrd will only be rebuilt when necessary.
